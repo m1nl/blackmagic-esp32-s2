@@ -1,8 +1,9 @@
 #include "soft-uart.h"
 #include <string.h>
 #include <freertos/portmacro.h>
-#include <esp32/clk.h>
+#include <esp_private/esp_clk.h>
 #include <driver/gpio.h>
+#include "esp_rom_gpio.h"
 
 struct SoftUart {
     uint32_t baudrate;
@@ -14,7 +15,7 @@ struct SoftUart {
 #define wait_cycles(cycles) \
     for(uint32_t start = cycle_count_get(); cycle_count_get() - start < cycles;)
 
-static inline uint32_t __attribute__((always_inline)) cycle_count_get() {
+static uint32_t cycle_count_get() {
     uint32_t ccount;
     __asm__ __volatile__("esync; rsr %0,ccount" : "=a"(ccount));
     return ccount;
@@ -56,7 +57,7 @@ SoftUart* soft_uart_init(uint32_t baudrate, uint8_t tx_pin) {
 
     uart->bit_time = (esp_clk_cpu_freq() / uart->baudrate);
 
-    gpio_pad_select_gpio(uart->tx_pin);
+    esp_rom_gpio_pad_select_gpio(uart->tx_pin);
     gpio_set_direction(uart->tx_pin, GPIO_MODE_OUTPUT);
     gpio_set_level(uart->tx_pin, !uart->invert);
     return uart;

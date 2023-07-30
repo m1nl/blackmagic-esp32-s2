@@ -12,7 +12,9 @@
 
 typedef struct mstring_t mstring_t;
 
+#ifndef STRING_FAILURE
 #define STRING_FAILURE ((size_t)-1)
+#endif
 
 /**
  * Allocate string

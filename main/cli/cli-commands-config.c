@@ -284,6 +284,9 @@ const char* nvs_type_to_str(nvs_type_t type) {
 }
 
 void cli_nvs_dump(Cli* cli, mstring_t* args) {
+    esp_err_t result;
+    nvs_iterator_t it = NULL;
+
     const char* partitions[] = {
         "nvs",
         "nvs_storage",
@@ -295,11 +298,11 @@ void cli_nvs_dump(Cli* cli, mstring_t* args) {
         cli_write_eol(cli);
 
         do {
-            nvs_iterator_t it = nvs_entry_find(partitions[i], NULL, NVS_TYPE_ANY);
-            while(it != NULL) {
+            result = nvs_entry_find(partitions[i], NULL, NVS_TYPE_ANY, &it);
+            while(result == ESP_OK) {
                 nvs_entry_info_t info;
                 nvs_entry_info(it, &info);
-                it = nvs_entry_next(it);
+                result = nvs_entry_next(&it);
 
                 if(strlen(info.namespace_name)) {
                     cli_printf(cli, "  \"%s:%s\"", info.namespace_name, info.key);

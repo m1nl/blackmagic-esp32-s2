@@ -8,6 +8,7 @@
 #include <m-string.h>
 #include <mdns.h>
 #include <lwip/apps/netbiosns.h>
+#include "esp_mac.h"
 
 #define TAG "network"
 
@@ -33,12 +34,15 @@
 
 static WiFiMode wifi_mode = WiFiModeSTA;
 
+esp_netif_t* sta_netif = NULL;
+esp_netif_t* ap_netif = NULL;
+
 uint32_t network_get_ip(void) {
-    tcpip_adapter_ip_info_t ip_info;
+    esp_netif_ip_info_t ip_info;
     if(wifi_mode == WiFiModeSTA) {
-        tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &ip_info);
+        esp_netif_get_ip_info(sta_netif, &ip_info);
     } else {
-        tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_AP, &ip_info);
+        esp_netif_get_ip_info(ap_netif, &ip_info);
     }
 
     return ip_info.ip.addr;
@@ -69,7 +73,9 @@ static void
 
 static void network_start_ap(mstring_t* ap_ssid, mstring_t* ap_pass) {
     ESP_LOGI(TAG, "init access point mode");
-    esp_netif_create_default_wifi_ap();
+
+    ap_netif = esp_netif_create_default_wifi_ap();
+    assert(ap_netif);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -101,7 +107,7 @@ static void network_start_ap(mstring_t* ap_ssid, mstring_t* ap_pass) {
     }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(
@@ -118,7 +124,9 @@ static bool network_connect_ap(mstring_t* ap_ssid, mstring_t* ap_pass) {
     bool result = false;
 
     ESP_LOGI(TAG, "init connect to AP");
-    esp_netif_create_default_wifi_sta();
+
+    sta_netif = esp_netif_create_default_wifi_sta();
+    assert(sta_netif);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));

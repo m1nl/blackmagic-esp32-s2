@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <esp_err.h>
 #include <tusb.h>
+#include <rom/gpio.h>
+#include <esp_mac.h>
 
 typedef enum {
     USBDeviceTypeDapLink,

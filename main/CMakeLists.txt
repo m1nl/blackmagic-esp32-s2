@@ -28,8 +28,29 @@ set(INCLUDES
     "."
 )
 
-idf_component_register(SRCS ${SOURCES}
-    INCLUDE_DIRS ${INCLUDES})
+set(PRIV_REQUIRES
+    driver
+    esp_hw_support
+    nvs_flash
+    spi_flash
+    esp_timer
+    esp_netif
+    esp_wifi
+    esp_http_server
+    json
+    blackmagic
+    dap-link
+    mlib
+    soft-uart
+    svelte-portal
+    tinyusb
+)
+
+idf_component_register(
+    SRCS ${SOURCES}
+    INCLUDE_DIRS ${INCLUDES}
+    PRIV_REQUIRES ${PRIV_REQUIRES}
+)
 
 # Commit
 execute_process(

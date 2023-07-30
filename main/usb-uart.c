@@ -1,54 +1,63 @@
-#include <simple-uart.h>
+#include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/stream_buffer.h>
-#include <esp_log.h>
+#include "driver/uart.h"
+
 #include "usb.h"
 #include "usb-uart.h"
-#include "network-uart.h"
 
-#define USB_UART_PORT_NUM UART_NUM_0
-#define USB_UART_TXD_PIN (43)
-#define USB_UART_RXD_PIN (44)
-#define USB_UART_BAUD_RATE (230400)
-#define USB_UART_RX_BUF_SIZE (1024)
-
-#define UART_RX_STREAM_BUFFER_SIZE_BYTES 1024 * 1024
-static uint8_t uart_rx_stream_storage[UART_RX_STREAM_BUFFER_SIZE_BYTES + 1] EXT_RAM_ATTR;
-static StaticStreamBuffer_t uart_rx_stream_buffer_struct;
-static StreamBufferHandle_t uart_rx_stream = NULL;
-
-static void usb_uart_rx_isr(void* context);
-static void usb_uart_rx_task(void* pvParameters);
+#define USB_UART_DEFAULT_BAUD_RATE (115200)
+#define USB_UART_DEFAULT_STOP_BITS (UART_STOP_BITS_1)
+#define USB_UART_DEFAULT_PARITY (UART_PARITY_DISABLE)
+#define USB_UART_DEFAULT_DATA_BITS (UART_DATA_8_BITS)
 
 static const char* TAG = "usb-uart";
+
+static void usb_uart_rx_task(void* pvParameters);
 
 void usb_uart_init() {
     ESP_LOGI(TAG, "init");
 
-    uart_rx_stream = xStreamBufferCreateStatic(
-        UART_RX_STREAM_BUFFER_SIZE_BYTES, 1, uart_rx_stream_storage, &uart_rx_stream_buffer_struct);
+    uart_config_t uart_config = {
+        .baud_rate = USB_UART_DEFAULT_BAUD_RATE,
+        .stop_bits = USB_UART_DEFAULT_STOP_BITS,
+        .parity = USB_UART_DEFAULT_PARITY,
+        .data_bits = USB_UART_DEFAULT_DATA_BITS,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB,
+    };
+
+    int intr_alloc_flags = 0;
+
+#if CONFIG_UART_ISR_IN_IRAM
+    intr_alloc_flags = ESP_INTR_FLAG_IRAM;
+#endif
+
+    ESP_ERROR_CHECK(uart_driver_install(
+        USB_UART_PORT_NUM, USB_UART_RX_BUF_SIZE, USB_UART_TX_BUF_SIZE, 0, NULL, intr_alloc_flags));
+    ESP_ERROR_CHECK(uart_set_pin(USB_UART_PORT_NUM, USB_UART_TXD_PIN, USB_UART_RXD_PIN, -1, -1));
+    ESP_ERROR_CHECK(uart_param_config(USB_UART_PORT_NUM, &uart_config));
 
     xTaskCreate(usb_uart_rx_task, "usb_uart_rx", 4096, NULL, 5, NULL);
 
-    UartConfig config = {
-        .uart_num = USB_UART_PORT_NUM,
-        .baud_rate = USB_UART_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .tx_pin_num = USB_UART_TXD_PIN,
-        .rx_pin_num = USB_UART_RXD_PIN,
-        .isr_context = uart_rx_stream,
-        .rx_isr = usb_uart_rx_isr,
-    };
-
-    simple_uart_init(&config);
     ESP_LOGI(TAG, "init done");
 }
 
 void usb_uart_write(const uint8_t* data, size_t data_size) {
-    simple_uart_write(USB_UART_PORT_NUM, data, data_size);
+    size_t pos = 0;
+
+    while(pos < data_size) {
+        size_t length = data_size - pos;
+
+        if(length > USB_UART_TX_BUF_SIZE) {
+            length = USB_UART_TX_BUF_SIZE;
+        }
+
+        uart_write_bytes(USB_UART_PORT_NUM, data + pos, length);
+        uart_wait_tx_done(USB_UART_PORT_NUM, 20 / portTICK_PERIOD_MS);
+
+        pos += length;
+    }
 }
 
 void usb_uart_set_line_state(bool dtr, bool rts) {
@@ -56,7 +65,11 @@ void usb_uart_set_line_state(bool dtr, bool rts) {
 }
 
 void usb_uart_set_line_coding(UsbUartConfig config) {
-    simple_uart_set_baud_rate(USB_UART_PORT_NUM, config.bit_rate);
+    uart_stop_bits_t stop_bits;
+    uart_parity_t parity;
+    uart_word_length_t data_bits;
+
+    ESP_ERROR_CHECK(uart_set_baudrate(USB_UART_PORT_NUM, config.bit_rate));
 
     // cdc.h
     // 0: 1 stop bit
@@ -64,17 +77,20 @@ void usb_uart_set_line_coding(UsbUartConfig config) {
     // 2: 2 stop bits
     switch(config.stop_bits) {
     case 0:
-        simple_uart_set_stop_bits(USB_UART_PORT_NUM, UART_STOP_BITS_1);
+        stop_bits = UART_STOP_BITS_1;
         break;
     case 1:
-        simple_uart_set_stop_bits(USB_UART_PORT_NUM, UART_STOP_BITS_1_5);
+        stop_bits = UART_STOP_BITS_1_5;
         break;
     case 2:
-        simple_uart_set_stop_bits(USB_UART_PORT_NUM, UART_STOP_BITS_2);
+        stop_bits = UART_STOP_BITS_2;
         break;
     default:
+        stop_bits = USB_UART_DEFAULT_STOP_BITS;
         break;
     }
+
+    ESP_ERROR_CHECK(uart_set_stop_bits(USB_UART_PORT_NUM, stop_bits));
 
     // cdc.h
     // 0: None
@@ -84,47 +100,61 @@ void usb_uart_set_line_coding(UsbUartConfig config) {
     // 4: Space
     switch(config.parity) {
     case 0:
-        simple_uart_set_parity(USB_UART_PORT_NUM, UART_PARITY_DISABLE);
+        parity = UART_PARITY_DISABLE;
         break;
     case 1:
-        simple_uart_set_parity(USB_UART_PORT_NUM, UART_PARITY_ODD);
+        parity = UART_PARITY_ODD;
         break;
     case 2:
-        simple_uart_set_parity(USB_UART_PORT_NUM, UART_PARITY_EVEN);
+        parity = UART_PARITY_EVEN;
         break;
     default:
+        parity = USB_UART_DEFAULT_PARITY;
         break;
     }
+
+    ESP_ERROR_CHECK(uart_set_parity(USB_UART_PORT_NUM, parity));
 
     // cdc.h
     // 5, 6, 7, 8 or 16
-    switch(config.parity) {
+    switch(config.data_bits) {
     case 5:
-        simple_uart_set_data_bits(USB_UART_PORT_NUM, UART_DATA_5_BITS);
+        data_bits = UART_DATA_5_BITS;
         break;
     case 6:
-        simple_uart_set_data_bits(USB_UART_PORT_NUM, UART_DATA_6_BITS);
+        data_bits = UART_DATA_6_BITS;
         break;
     case 7:
-        simple_uart_set_data_bits(USB_UART_PORT_NUM, UART_DATA_7_BITS);
+        data_bits = UART_DATA_7_BITS;
         break;
     case 8:
-        simple_uart_set_data_bits(USB_UART_PORT_NUM, UART_DATA_8_BITS);
+        data_bits = UART_DATA_8_BITS;
         break;
     default:
+        data_bits = USB_UART_DEFAULT_DATA_BITS;
         break;
     }
+
+    ESP_ERROR_CHECK(uart_set_word_length(USB_UART_PORT_NUM, data_bits));
 }
 
 UsbUartConfig usb_uart_get_line_coding() {
+    uart_stop_bits_t stop_bits;
+    uart_parity_t parity;
+    uart_word_length_t data_bits;
+
     UsbUartConfig config = {
-        .bit_rate = simple_uart_get_baud_rate(USB_UART_PORT_NUM),
-        .stop_bits = 0,
+        .bit_rate = 0,
         .parity = 0,
+        .stop_bits = 0,
         .data_bits = 0,
     };
 
-    switch(simple_uart_get_stop_bits(USB_UART_PORT_NUM)) {
+    ESP_ERROR_CHECK(uart_get_baudrate(USB_UART_PORT_NUM, &config.bit_rate));
+
+    ESP_ERROR_CHECK(uart_get_stop_bits(USB_UART_PORT_NUM, &stop_bits));
+
+    switch(stop_bits) {
     case UART_STOP_BITS_1:
         config.stop_bits = 0;
         break;
@@ -138,7 +168,9 @@ UsbUartConfig usb_uart_get_line_coding() {
         break;
     }
 
-    switch(simple_uart_get_parity(USB_UART_PORT_NUM)) {
+    ESP_ERROR_CHECK(uart_get_parity(USB_UART_PORT_NUM, &parity));
+
+    switch(parity) {
     case UART_PARITY_DISABLE:
         config.parity = 0;
         break;
@@ -152,7 +184,9 @@ UsbUartConfig usb_uart_get_line_coding() {
         break;
     }
 
-    switch(simple_uart_get_data_bits(USB_UART_PORT_NUM)) {
+    ESP_ERROR_CHECK(uart_get_word_length(USB_UART_PORT_NUM, &data_bits));
+
+    switch(data_bits) {
     case UART_DATA_5_BITS:
         config.data_bits = 5;
         break;
@@ -172,42 +206,28 @@ UsbUartConfig usb_uart_get_line_coding() {
     return config;
 }
 
+#include "network-uart.h"
 #include "network-http.h"
+
 static void usb_uart_rx_task(void* pvParameters) {
     uint8_t* data = malloc(USB_UART_RX_BUF_SIZE);
 
     while(1) {
-        size_t length =
-            xStreamBufferReceive(uart_rx_stream, data, USB_UART_RX_BUF_SIZE, portMAX_DELAY);
+        int len = uart_read_bytes(
+            USB_UART_PORT_NUM, data, USB_UART_RX_BUF_SIZE, 20 / portTICK_PERIOD_MS);
 
-        if(length > 0) {
-            for(size_t i = 0; i < length; i++) {
-                if((i + 1) == length) {
-                    usb_uart_tx_char(data[i], true);
-                } else {
-                    usb_uart_tx_char(data[i], false);
-                }
-            }
-            network_http_uart_write_data(data, length);
-            if(network_uart_connected()) {
-                network_uart_send(data, length);
+        for(size_t i = 0; i < len; i++) {
+            if((i + 1) == len) {
+                usb_uart_tx_char(data[i], true);
+            } else {
+                usb_uart_tx_char(data[i], false);
             }
         }
+
+        network_http_uart_write_data(data, len);
+
+        if(network_uart_connected()) {
+            network_uart_send(data, len);
+        }
     }
-}
-
-static void usb_uart_rx_isr(void* context) {
-    StreamBufferHandle_t stream = context;
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    uint8_t data;
-    while(simple_uart_available(USB_UART_PORT_NUM)) {
-        simple_uart_read(USB_UART_PORT_NUM, &data, 1);
-
-        size_t ret __attribute__((unused));
-        // we will drop data if the stream overflows
-        ret = xStreamBufferSendFromISR(stream, &data, 1, &xHigherPriorityTaskWoken);
-    }
-
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }

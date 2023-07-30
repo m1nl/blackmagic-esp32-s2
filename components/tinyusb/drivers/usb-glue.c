@@ -4,6 +4,7 @@
 #include "usb-glue.h"
 
 #define TAG "usb-glue"
+
 #define CONFIG_TINYUSB_TASK_STACK_SIZE 4096
 #define CONFIG_TINYUSB_TASK_PRIORITY 17
 
@@ -235,67 +236,12 @@ void tud_cdc_line_coding_cb(uint8_t interface, cdc_line_coding_t const* p_line_c
     }
 }
 
-/***** HAL *****/
+/***** Glue *****/
 
-#include <driver/gpio.h>
-#include <driver/periph_ctrl.h>
-#include <hal/usb_hal.h>
-#include <soc/usb_periph.h>
-#include <esp_rom_gpio.h>
-#include <hal/gpio_ll.h>
-#include <delay.h>
 #include <esp_log.h>
 #include <esp_check.h>
+#include <esp_private/usb_phy.h>
 
-static void usb_hal_init_pins(usb_hal_context_t* usb) {
-    /* usb_periph_iopins currently configures USB_OTG as USB Device.
-     * Introduce additional parameters in usb_hal_context_t when adding support
-     * for USB Host.
-     */
-    for(const usb_iopin_dsc_t* iopin = usb_periph_iopins; iopin->pin != -1; ++iopin) {
-        if((usb->use_external_phy) || (iopin->ext_phy_only == 0)) {
-            esp_rom_gpio_pad_select_gpio(iopin->pin);
-            if(iopin->is_output) {
-                esp_rom_gpio_connect_out_signal(iopin->pin, iopin->func, false, false);
-            } else {
-                esp_rom_gpio_connect_in_signal(iopin->pin, iopin->func, false);
-                if((iopin->pin != GPIO_FUNC_IN_LOW) && (iopin->pin != GPIO_FUNC_IN_HIGH)) {
-                    gpio_ll_input_enable(&GPIO, iopin->pin);
-                }
-            }
-            esp_rom_gpio_pad_unhold(iopin->pin);
-        }
-    }
-    if(!usb->use_external_phy) {
-        gpio_set_drive_capability(USBPHY_DM_NUM, GPIO_DRIVE_CAP_3);
-        gpio_set_drive_capability(USBPHY_DP_NUM, GPIO_DRIVE_CAP_3);
-    }
-}
-
-static void usb_hal_bus_reset() {
-    gpio_config_t io_conf;
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    io_conf.mode = GPIO_MODE_OUTPUT_OD;
-    io_conf.pin_bit_mask = ((1 << USBPHY_DM_NUM) | (1 << USBPHY_DP_NUM));
-    io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
-    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    gpio_config(&io_conf);
-
-    gpio_set_level(USBPHY_DM_NUM, 0);
-    gpio_set_level(USBPHY_DP_NUM, 0);
-    delay(100);
-    gpio_set_level(USBPHY_DM_NUM, 1);
-    gpio_set_level(USBPHY_DP_NUM, 1);
-}
-
-static void usb_hal_tusb_device_task(void* arg) {
-    ESP_LOGD(TAG, "tinyusb task started");
-    while(1) { // RTOS forever loop
-        tud_task();
-    }
-}
-
-/***** Glue *****/
 char* serial_desc = NULL;
 char dap_serial_number[32];
 
@@ -318,6 +264,24 @@ const char* usb_glue_get_serial_number() {
     return serial_desc;
 }
 
+static usb_phy_handle_t phy_hdl;
+
+static void usb_phy_init(void) {
+    usb_phy_config_t phy_conf = {
+        .controller = USB_PHY_CTRL_OTG,
+        .otg_mode = USB_OTG_MODE_DEVICE,
+        .target = USB_PHY_TARGET_INT,
+    };
+    usb_new_phy(&phy_conf, &phy_hdl);
+}
+
+static void usb_hal_tusb_device_task(void* arg) {
+    ESP_LOGD(TAG, "tinyusb task started");
+    while(1) { // RTOS forever loop
+        tud_task();
+    }
+}
+
 esp_err_t usb_glue_init(USBDeviceType device_type) {
     usb_device_type = device_type;
 
@@ -332,16 +296,7 @@ esp_err_t usb_glue_init(USBDeviceType device_type) {
         ESP_LOGI(TAG, "Dap serial number: %s", dap_serial_number);
     }
 
-    usb_hal_bus_reset();
-
-    // Enable APB CLK to USB peripheral
-    periph_module_enable(PERIPH_USB_MODULE);
-    periph_module_reset(PERIPH_USB_MODULE);
-
-    // Initialize HAL layer
-    usb_hal_context_t hal = {.use_external_phy = false};
-    usb_hal_init(&hal);
-    usb_hal_init_pins(&hal);
+    usb_phy_init();
 
     ESP_RETURN_ON_FALSE(tusb_init(), ESP_FAIL, TAG, "init TinyUSB failed");
 
@@ -358,10 +313,6 @@ esp_err_t usb_glue_init(USBDeviceType device_type) {
     ESP_LOGI(TAG, "TinyUSB Driver installed");
 
     return ESP_OK;
-}
-
-void usb_glue_reset_bus() {
-    usb_hal_bus_reset();
 }
 
 void usb_glue_set_connected_callback(void (*callback)(void* context), void* context) {
@@ -404,6 +355,10 @@ void usb_glue_dap_set_receive_callback(void (*callback)(void* context), void* co
 }
 
 void usb_glue_cdc_send(const uint8_t* buf, size_t len, bool flush) {
+    if(tud_suspended()) {
+        tud_remote_wakeup();
+    }
+
     if(usb_device_type == USBDeviceTypeDualCDC) {
         tud_cdc_n_write(BlackmagicCDCTypeUART, buf, len);
         if(flush) {
@@ -426,6 +381,10 @@ size_t usb_glue_cdc_receive(uint8_t* buf, size_t len) {
 }
 
 void usb_glue_gdb_send(const uint8_t* buf, size_t len, bool flush) {
+    if(tud_suspended()) {
+        tud_remote_wakeup();
+    }
+
     if(usb_device_type == USBDeviceTypeDualCDC) {
         tud_cdc_n_write(BlackmagicCDCTypeGDB, buf, len);
         if(flush) {

@@ -26,6 +26,7 @@ extern "C" {
 
 #define CFG_TUSB_RHPORT0_MODE OPT_MODE_DEVICE
 #define CFG_TUSB_OS OPT_OS_FREERTOS
+#define CFG_TUSB_OS_INC_PATH freertos/
 
 // CFG_TUSB_DEBUG is defined by compiler in DEBUG build
 #define CFG_TUSB_DEBUG CONFIG_ESPUSB_DEBUG

@@ -11,6 +11,8 @@
 #include "led.h"
 #include "helpers.h"
 #include "usb-uart.h"
+#include "esp_chip_info.h"
+#include "esp_mac.h"
 
 #define TAG "network-http"
 #define JSON_ERROR(error_text) "{\"error\": \"" error_text "\"}"
@@ -671,7 +673,7 @@ err_fail:
 #include <stream_buffer.h>
 
 #define WEBSOCKET_STREAM_BUFFER_SIZE_BYTES 512 * 1024
-static uint8_t websocket_stream_storage[WEBSOCKET_STREAM_BUFFER_SIZE_BYTES + 1] EXT_RAM_ATTR;
+static uint8_t websocket_stream_storage[WEBSOCKET_STREAM_BUFFER_SIZE_BYTES + 1] EXT_RAM_BSS_ATTR;
 static StaticStreamBuffer_t websocket_stream_buffer_struct;
 static StreamBufferHandle_t websocket_stream = NULL;
 
