@@ -33,7 +33,7 @@ void gdb_application_thread(void* pvParameters) {
 
 void app_main(void) {
     // Software UART logging at pin 7, 57600 baud
-    //    soft_uart_log_init(7, 57600);
+    soft_uart_log_init(7, 57600);
 
     ESP_LOGI(TAG, "start");
 
